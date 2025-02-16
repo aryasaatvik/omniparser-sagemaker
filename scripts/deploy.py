@@ -5,6 +5,7 @@ from sagemaker.model import Model
 from sagemaker.predictor import Predictor
 import os
 import time
+import argparse
 
 def create_sns_topics(region: str, account: str) -> tuple:
     """Create SNS topics for async inference notifications if they don't exist.
@@ -134,15 +135,16 @@ def setup_autoscaling(endpoint_name: str, min_capacity: int = 0, max_capacity: i
     )
     print("Autoscaling configured successfully")
 
-def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
+def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2", delete_only=False):
     """Deploy OmniParser model to SageMaker endpoint.
     
     Args:
         model_bucket (str): S3 bucket containing model artifacts
         model_prefix (str): S3 prefix where model.tar.gz is located
+        delete_only (bool): If True, only delete existing resources without deploying
         
     Returns:
-        sagemaker.predictor.Predictor: Predictor object for the endpoint
+        sagemaker.predictor.Predictor: Predictor object for the endpoint, None if delete_only=True
         
     Raises:
         ValueError: If required environment variables are missing
@@ -151,6 +153,16 @@ def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
     try:
         # Initialize SageMaker session
         sagemaker_session = sagemaker.Session()
+        endpoint_name = "omniparser-v2-async"
+        
+        # Clean up existing resources
+        print("Cleaning up existing resources...")
+        cleanup_sagemaker_resources(sagemaker_session.sagemaker_client, endpoint_name)
+        
+        if delete_only:
+            print("Delete-only mode, skipping deployment")
+            return None
+            
         account = boto3.client('sts').get_caller_identity()['Account']
         region = boto3.session.Session().region_name or 'us-west-2'
         
@@ -187,10 +199,6 @@ def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
                 "IncludeInferenceResponseIn": ["SUCCESS_NOTIFICATION_TOPIC", "ERROR_NOTIFICATION_TOPIC"]
             }
         )
-
-        # Clean up existing resources
-        endpoint_name = "omniparser-v2-async"
-        cleanup_sagemaker_resources(sagemaker_session.sagemaker_client, endpoint_name)
         
         # Create SageMaker model
         model = Model(
@@ -230,8 +238,21 @@ def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
         raise
 
 if __name__ == "__main__":
-    # Example usage
-    model_bucket = os.environ.get('OMNIPARSER_MODEL_BUCKET')
-    if not model_bucket:
-        raise ValueError("OMNIPARSER_MODEL_BUCKET environment variable must be set")
-    deploy_omniparser(model_bucket) 
+    parser = argparse.ArgumentParser(description='Deploy or delete OmniParser SageMaker endpoint')
+    parser.add_argument('--model-bucket', type=str, help='S3 bucket containing model artifacts',
+                      default=os.environ.get('OMNIPARSER_MODEL_BUCKET'))
+    parser.add_argument('--model-prefix', type=str, default="model/omniparser-v2",
+                      help='S3 prefix where model.tar.gz is located')
+    parser.add_argument('--delete-only', action='store_true',
+                      help='Only delete existing resources without deploying')
+    
+    args = parser.parse_args()
+    
+    if not args.model_bucket and not args.delete_only:
+        raise ValueError("OMNIPARSER_MODEL_BUCKET environment variable or --model-bucket argument must be set")
+    
+    deploy_omniparser(
+        model_bucket=args.model_bucket,
+        model_prefix=args.model_prefix,
+        delete_only=args.delete_only
+    ) 

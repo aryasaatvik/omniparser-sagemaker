@@ -6,6 +6,62 @@ from sagemaker.predictor import Predictor
 import os
 import time
 
+def create_sns_topics(region: str, account: str) -> tuple:
+    """Create SNS topics for async inference notifications if they don't exist.
+    
+    Args:
+        region (str): AWS region
+        account (str): AWS account ID
+        
+    Returns:
+        tuple: (success_topic_arn, error_topic_arn)
+    """
+    print("Setting up SNS topics for async inference notifications...")
+    sns = boto3.client('sns')
+    
+    # Create success topic
+    success_topic_name = "omniparser-success"
+    success_topic_arn = f"arn:aws:sns:{region}:{account}:{success_topic_name}"
+    try:
+        sns.get_topic_attributes(TopicArn=success_topic_arn)
+        print(f"Success topic {success_topic_name} already exists")
+    except sns.exceptions.NotFoundException:
+        print(f"Creating success topic {success_topic_name}...")
+        response = sns.create_topic(Name=success_topic_name)
+        success_topic_arn = response['TopicArn']
+        
+        # Add tags
+        sns.tag_resource(
+            ResourceArn=success_topic_arn,
+            Tags=[
+                {'Key': 'Purpose', 'Value': 'SageMaker-Async-Inference'},
+                {'Key': 'Service', 'Value': 'OmniParser'}
+            ]
+        )
+    
+    # Create error topic
+    error_topic_name = "omniparser-error"
+    error_topic_arn = f"arn:aws:sns:{region}:{account}:{error_topic_name}"
+    try:
+        sns.get_topic_attributes(TopicArn=error_topic_arn)
+        print(f"Error topic {error_topic_name} already exists")
+    except sns.exceptions.NotFoundException:
+        print(f"Creating error topic {error_topic_name}...")
+        response = sns.create_topic(Name=error_topic_name)
+        error_topic_arn = response['TopicArn']
+        
+        # Add tags
+        sns.tag_resource(
+            ResourceArn=error_topic_arn,
+            Tags=[
+                {'Key': 'Purpose', 'Value': 'SageMaker-Async-Inference'},
+                {'Key': 'Service', 'Value': 'OmniParser'}
+            ]
+        )
+    
+    print("SNS topics setup complete")
+    return success_topic_arn, error_topic_arn
+
 def cleanup_sagemaker_resources(sagemaker_client, endpoint_name):
     """Clean up existing SageMaker resources."""
     try:
@@ -34,6 +90,50 @@ def cleanup_sagemaker_resources(sagemaker_client, endpoint_name):
         if "Could not find model" not in str(e):
             raise
 
+def setup_autoscaling(endpoint_name: str, min_capacity: int = 0, max_capacity: int = 2):
+    """Set up autoscaling for the endpoint based on queue size.
+    
+    Args:
+        endpoint_name (str): Name of the SageMaker endpoint
+        min_capacity (int): Minimum number of instances (default: 0)
+        max_capacity (int): Maximum number of instances (default: 2)
+    """
+    print(f"Setting up autoscaling for endpoint {endpoint_name}...")
+    application_autoscaling = boto3.client('application-autoscaling')
+    
+    # Register the endpoint as a scalable target
+    application_autoscaling.register_scalable_target(
+        ServiceNamespace='sagemaker',
+        ResourceId=f'endpoint/{endpoint_name}/variant/AllTraffic',
+        ScalableDimension='sagemaker:variant:DesiredInstanceCount',
+        MinCapacity=min_capacity,
+        MaxCapacity=max_capacity
+    )
+    
+    # Configure scaling policy based on queue size
+    application_autoscaling.put_scaling_policy(
+        PolicyName=f'{endpoint_name}-queue-based-autoscaling',
+        ServiceNamespace='sagemaker',
+        ResourceId=f'endpoint/{endpoint_name}/variant/AllTraffic',
+        ScalableDimension='sagemaker:variant:DesiredInstanceCount',
+        PolicyType='TargetTrackingScaling',
+        TargetTrackingScalingPolicyConfiguration={
+            'TargetValue': 5.0,  # Target 5 requests in queue per instance
+            'CustomizedMetricSpecification': {
+                'MetricName': 'ApproximateBacklogSizePerInstance',
+                'Namespace': 'AWS/SageMaker',
+                'Dimensions': [
+                    {'Name': 'EndpointName', 'Value': endpoint_name},
+                    {'Name': 'VariantName', 'Value': 'AllTraffic'}
+                ],
+                'Statistic': 'Average'
+            },
+            'ScaleInCooldown': 600,  # 10 minutes
+            'ScaleOutCooldown': 300   # 5 minutes
+        }
+    )
+    print("Autoscaling configured successfully")
+
 def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
     """Deploy OmniParser model to SageMaker endpoint.
     
@@ -54,8 +154,10 @@ def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
         account = boto3.client('sts').get_caller_identity()['Account']
         region = boto3.session.Session().region_name or 'us-west-2'
         
+        # Create SNS topics if they don't exist
+        success_topic_arn, error_topic_arn = create_sns_topics(region, account)
+        
         # Build the ECR image URI
-
         image_uri = f"{account}.dkr.ecr.{region}.amazonaws.com/omniparser:latest"
         
         # Verify model artifacts exist
@@ -75,10 +177,15 @@ def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
         # Model artifacts S3 location
         model_data = f"s3://{model_bucket}/{model_prefix}/model.tar.gz"
         
-        # Configure async inference
+        # Configure async inference with SNS notifications
         async_config = AsyncInferenceConfig(
             output_path=f"s3://{sagemaker_session.default_bucket()}/omniparser/async-output",
-            max_concurrent_invocations_per_instance=2
+            max_concurrent_invocations_per_instance=2,
+            notification_config={
+                "SuccessTopic": success_topic_arn,
+                "ErrorTopic": error_topic_arn,
+                "IncludeInferenceResponseIn": ["SUCCESS_NOTIFICATION_TOPIC", "ERROR_NOTIFICATION_TOPIC"]
+            }
         )
 
         # Clean up existing resources
@@ -108,6 +215,14 @@ def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2"):
         )
         
         print(f"Endpoint deployed: {predictor.endpoint_name}")
+        
+        # Set up autoscaling
+        setup_autoscaling(
+            endpoint_name=endpoint_name,
+            min_capacity=0,  # Scale to zero when no requests
+            max_capacity=2   # Max 2 instances
+        )
+        
         return predictor
         
     except Exception as e:

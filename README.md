@@ -15,22 +15,59 @@ omniparser-sagemaker/
 ├── scripts/               # Deployment and build scripts
 │   ├── build_and_push.sh # Script to build and push Docker image to ECR
 │   └── deploy.py         # Script to deploy model to SageMaker
-└── examples/              # Example code for using the endpoint
-    └── invoke_endpoint.py # Example of invoking the async endpoint
+├── .python-version       # Python version specification
+├── pyproject.toml        # Project configuration and dev dependencies
+├── requirements.txt      # Production dependencies
+└── .gitignore           # Git ignore rules
 ```
 
 ## Prerequisites
 
 1. AWS CLI installed and configured with appropriate credentials
 2. Docker installed and running
-3. Python 3.12 or later
-4. Required Python packages:
+3. Python 3.11
+4. Required Python packages (install via `pip install -r requirements.txt`):
    ```
+   # Core Dependencies
    boto3
    sagemaker
-   Pillow
-   huggingface-hub  # For downloading model weights
+   sagemaker-inference
+   multi-model-server
+   
+   # ML & Vision
+   torch
+   torchvision
+   transformers
+   ultralytics==8.3.70
+   supervision==0.18.0
+   opencv-python
+   opencv-python-headless
+   
+   # OCR Components
+   paddlepaddle
+   paddleocr
+   easyocr
+   
+   # Utilities
+   numpy==1.26.4
+   einops==0.8.0
    ```
+
+## Development Setup
+
+This project uses `pyproject.toml` for development dependencies and configuration. To set up a development environment:
+
+```bash
+# Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install development dependencies
+pip install -e ".[dev]"
+
+# Install pre-commit hooks
+pre-commit install
+```
 
 ## Step-by-Step Deployment
 

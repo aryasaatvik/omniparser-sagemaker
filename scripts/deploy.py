@@ -216,7 +216,7 @@ def deploy_omniparser(model_bucket, model_prefix="model/omniparser-v2", delete_o
         # Deploy as async endpoint
         predictor = model.deploy(
             initial_instance_count=1,
-            instance_type="ml.g4dn.xlarge",  # GPU instance
+            instance_type="ml.g6.xlarge",  # GPU instance
             endpoint_name=endpoint_name,
             async_inference_config=async_config,
             wait=True
